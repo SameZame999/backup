@@ -1,0 +1,3 @@
+# バックアップ設定ファイル (TSV形式: 元パス [TAB] 先パス)
+# 行頭が # の場合はコメントとして無視されます
+#/Users/foo/tmp/backup_src	/Users/foo/tmp/backup_dst/backup_src
