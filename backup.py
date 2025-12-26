@@ -93,6 +93,7 @@ def run_backup(report_file):
             except Exception as e:
                 print(f"[FAILED ] {line_no}行目: 重大な例外: {e}")
 
+    print(f"--- バックアップ終了: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
     print(f"--- すべての処理が完了しました ---")
 
 def sync_copy(src, dst, report_file):
