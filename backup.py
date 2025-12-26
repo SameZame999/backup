@@ -145,12 +145,12 @@ def safe_copy_item(src, dst, report_file):
                 src_mtime = os.path.getmtime(src)
                 dst_mtime = os.path.getmtime(dst)
                 
-                # 誤差を考慮し、微小な差（0.1秒以上）があれば更新とみなす
-                if abs(src_mtime - dst_mtime) > 0.1:
-                    status = "UPDATE"
+                # 1.0秒以上差があれば更新とみなす（0.1秒以下の単位は誤差が出る）
+                diff = src_mtime - dst_mtime
+                if diff > 1.0:
+                    status = f"UPDATE({diff:.2f}s)"
             except OSError:
-                status = "UPDATE" # 時間が取得できない場合は安全のため更新扱い
-
+                status = "UPDATE(不明)" # 時間が取得できない場合は安全のため更新扱い
         # 2. 処理の実行
         if status:
             # 既存の宛先を削除
