@@ -16,7 +16,7 @@ def log_change(report_file, status, src, dst):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     try:
         with open(report_file, 'a', encoding='utf-8') as f:
-            f.write(f"[{timestamp}] {status:6}: {src} -> {dst}\n")
+            f.write(f"[{timestamp}] {status:15}: {src} -> {dst}\n")
     except Exception as e:
         print(f"【ログ出力失敗】: {e}")
 
@@ -110,10 +110,8 @@ def sync_copy(src, dst, report_file):
             rel_path = os.path.relpath(root, src)
             dst_root = os.path.join(dst, rel_path)
             
-            # ディレクトリ自体の作成（新規の場合のみログ記録可能だが、基本はファイル単位でログ）
             if not os.path.exists(dst_root):
                 os.makedirs(dst_root, exist_ok=True)
-                # フォルダ作成もADDとして記録したい場合はここに追加
             
             for name in files + dirs:
                 if name in IGNORE_LIST: continue
@@ -131,7 +129,8 @@ def sync_copy(src, dst, report_file):
 
 def safe_copy_item(src, dst, report_file):
     """
-    更新日時を比較し、必要に応じてコピーとログ記録を行う。
+    更新日時を比較し、取得できない場合はファイルサイズを比較して
+    必要に応じてコピーとログ記録を行う。
     """
     try:
         status = None
@@ -140,33 +139,39 @@ def safe_copy_item(src, dst, report_file):
         if not os.path.exists(dst) and not os.path.islink(dst):
             status = "ADD"
         else:
-            # 更新日時の比較 (秒単位の浮動小数点を比較)
-            # シンボリックリンクの場合はリンク自体の時間を取得するため lexists/lstat は使わず簡易化
             try:
+                # 更新日時の比較 (秒単位の浮動小数点を比較)
                 src_mtime = os.path.getmtime(src)
                 dst_mtime = os.path.getmtime(dst)
                 
-                # 1.0秒以上差があれば更新とみなす（0.1秒以下の単位は誤差が出る）
                 diff = src_mtime - dst_mtime
+                # 1.0秒以上差があれば更新とみなす
                 if diff > 1.0:
-                    status = f"UPDATE({diff:.2f}s)"
+                    status = f"UPDATE(Time:{diff:.2f}s)"
             except OSError:
-                status = "UPDATE(不明)" # 時間が取得できない場合は安全のため更新扱い
+                # 日時が取得できない場合（権限やFSの制約）、サイズ比較を試みる
+                try:
+                    src_size = os.path.getsize(src)
+                    dst_size = os.path.getsize(dst)
+                    if src_size != dst_size:
+                        status = f"UPDATE(Size:{src_size}vs{dst_size})"
+                except OSError:
+                    # サイズすら取得できない場合は更新しない。
+                    status = None
+
         # 2. 処理の実行
         if status:
-            # 既存の宛先を削除
             if os.path.exists(dst) or os.path.islink(dst):
                 if os.path.isdir(dst) and not os.path.islink(dst):
                     shutil.rmtree(dst)
                 else:
                     os.remove(dst)
             
-            # コピー実行
             if os.path.islink(src):
                 link_to = os.readlink(src)
                 os.symlink(link_to, dst)
             else:
-                shutil.copy2(src, dst) # copy2でメタデータ(更新日時)も維持
+                shutil.copy2(src, dst)
             
             log_change(report_file, status, src, dst)
         
