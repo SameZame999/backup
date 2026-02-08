@@ -2,12 +2,31 @@ import os
 import shutil
 import subprocess
 import argparse
+import logging
+from dataclasses import dataclass
 from datetime import datetime
+from typing import List, Optional
 
 # バックアップから除外するリスト
-IGNORE_LIST = []
+IGNORE_LIST: List[str] = []
 
-def log_change(report_file, status, src, dst):
+logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    if not logger.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+
+
+@dataclass
+class BackupTarget:
+    src: str
+    dst: str
+    line_no: int
+
+def log_change(report_file: Optional[str], status: str, src: str, dst: str) -> None:
     """
     変更履歴（ADD/UPDATE/DELETE）をファイルに追記する。
     """
@@ -18,9 +37,9 @@ def log_change(report_file, status, src, dst):
         with open(report_file, 'a', encoding='utf-8') as f:
             f.write(f"[{timestamp}] {status:15}: {src} -> {dst}\n")
     except Exception as e:
-        print(f"【ログ出力失敗】: {e}")
+        logger.error("【ログ出力失敗】: %s", e)
 
-def is_actually_mounted(path):
+def is_actually_mounted(path: str) -> bool:
     if not os.path.isdir(path):
         return False
     try:
@@ -37,68 +56,87 @@ def is_actually_mounted(path):
     except Exception:
         return os.path.ismount(path)
 
-def run_backup(report_file):
+def extract_backup_targets(config_path: str) -> List[BackupTarget]:
+    targets = []
+    with open(config_path, 'r', encoding='utf-8') as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split('\t')
+            if len(parts) < 2:
+                continue
+
+            targets.append(BackupTarget(src=parts[0].strip(), dst=parts[1].strip(), line_no=line_no))
+    return targets
+
+
+def determine_mount_point(path: str) -> Optional[str]:
+    if not path.startswith('/Volumes'):
+        return None
+    path_parts = [p for p in path.split(os.sep) if p]
+    if len(path_parts) >= 2:
+        return os.path.join(os.sep, path_parts[0], path_parts[1])
+    return None
+
+
+def execute_backup(entry: BackupTarget, report_file: Optional[str], today_str: str) -> bool:
+    copy_success = sync_copy(entry.src, entry.dst, report_file)
+    sync_success = True
+    if copy_success:
+        sync_success = perform_sync_deleted(entry.src, entry.dst, today_str, report_file)
+    return copy_success and sync_success
+
+
+def run_backup(report_file: Optional[str]) -> None:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(base_dir)
     config_path = os.path.join(base_dir, 'backup.config')
 
     if not os.path.exists(config_path):
-        print(f"【エラー】設定ファイルが見つかりません: {config_path}")
+        logger.error("【エラー】設定ファイルが見つかりません: %s", config_path)
         return
 
     today_str = datetime.now().strftime('%Y%m%d')
-    print(f"--- バックアップ開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    
-    # レポートファイルの初期化（新規作成）
+    logger.info("--- バックアップ開始: %s ---", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
     if report_file:
         with open(report_file, 'w', encoding='utf-8') as f:
             f.write(f"=== バックアップレポート: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
 
-    with open(config_path, 'r', encoding='utf-8') as f:
-        for line_no, line in enumerate(f, 1):
-            line = line.strip()
-            if not line or line.startswith('#'): continue
+    targets = extract_backup_targets(config_path)
 
-            try:
-                parts = line.split('\t')
-                if len(parts) < 2: continue
-                src, dst = parts[0].strip(), parts[1].strip()
+    valid_targets: List[BackupTarget] = []
+    for entry in targets:
+        dst_parent = os.path.dirname(entry.dst)
+        if not dst_parent:
+            logger.error("【エラー】%s行目: 出力先が不正です", entry.line_no)
+            continue
+        if not os.path.exists(dst_parent):
+            logger.error("【エラー】親ディレクトリが存在しません: %s", dst_parent)
+            continue
 
-                dst_parent = os.path.dirname(dst)
-                if not os.path.exists(dst_parent):
-                    print(f"【エラー】親ディレクトリが存在しません: {dst_parent}")
-                    continue
+        mount_point = determine_mount_point(entry.dst)
+        if mount_point and not is_actually_mounted(mount_point):
+            logger.error("【エラー】ドライブが未マウントです: %s", mount_point)
+            continue
 
-                if dst.startswith('/Volumes'):
-                    path_parts = [p for p in dst.split(os.sep) if p]
-                    if len(path_parts) >= 2:
-                        mount_point = os.path.join(os.sep, path_parts[0], path_parts[1])
-                        if not is_actually_mounted(mount_point):
-                            print(f"【エラー】ドライブが未マウントです: {mount_point}")
-                            continue
+        valid_targets.append(entry)
 
-                # 同期・コピー処理
-                copy_success = sync_copy(src, dst, report_file)
+    for entry in valid_targets:
+        success = execute_backup(entry, report_file, today_str)
+        if success:
+            logger.info("[SUCCESS] %s -> %s", entry.src, entry.dst)
+        else:
+            logger.error("[FAILED ] %s -> %s", entry.src, entry.dst)
 
-                # 退避処理
-                sync_success = True
-                if copy_success:
-                    sync_success = perform_sync_deleted(src, dst, today_str, report_file)
-                
-                if copy_success and sync_success:
-                    print(f"[SUCCESS] {src} -> {dst}")
-                else:
-                    print(f"[FAILED ] {src} -> {dst}")
+    logger.info("--- バックアップ終了: %s ---", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    logger.info("--- すべての処理が完了しました ---")
 
-            except Exception as e:
-                print(f"[FAILED ] {line_no}行目: 重大な例外: {e}")
-
-    print(f"--- バックアップ終了: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    print(f"--- すべての処理が完了しました ---")
-
-def sync_copy(src, dst, report_file):
+def sync_copy(src: str, dst: str, report_file: Optional[str]) -> bool:
     if not os.path.exists(src) and not os.path.islink(src):
-        print(f"【エラー】元パスにアクセスできません: {src}")
+        logger.error("【エラー】元パスにアクセスできません: %s", src)
         return False
     try:
         if not os.path.isdir(src) or os.path.islink(src):
@@ -124,10 +162,10 @@ def sync_copy(src, dst, report_file):
                     os.makedirs(d_item, exist_ok=True)
         return overall_status
     except Exception as e:
-        print(f"【コピーエラー】{src}: {e}")
+        logger.error("【コピーエラー】%s: %s", src, e)
         return False
 
-def safe_copy_item(src, dst, report_file):
+def safe_copy_item(src: str, dst: str, report_file: Optional[str]) -> bool:
     """
     更新日時を比較し、取得できない場合はファイルサイズを比較して
     必要に応じてコピーとログ記録を行う。
@@ -177,13 +215,13 @@ def safe_copy_item(src, dst, report_file):
         
         return True
     except Exception as e:
-        print(f"【ファイル同期失敗】{src} -> {dst}: {e}")
+        logger.error("【ファイル同期失敗】%s -> %s: %s", src, dst, e)
         return False
 
-def perform_sync_deleted(src, dst, date_str, report_file):
+def perform_sync_deleted(src: str, dst: str, date_str: str, report_file: Optional[str]) -> bool:
     if not os.path.exists(dst) or not os.path.exists(src): return True
     if os.path.isdir(src) and not os.listdir(src):
-        print(f"【安全停止】元フォルダが空のため退避処理を中止しました: {src}")
+        logger.error("【安全停止】元フォルダが空のため退避処理を中止しました: %s", src)
         return False
 
     deleted_base_dir = f"{dst.rstrip(os.sep)}.deleted_at_{date_str}"
@@ -211,7 +249,7 @@ def perform_sync_deleted(src, dst, date_str, report_file):
                     
                     if name in dirs: dirs.remove(name)
                 except Exception as e:
-                    print(f"【退避失敗】{d_path}: {e}")
+                    logger.error("【退避失敗】%s: %s", d_path, e)
                     overall_sync_status = False
     return overall_sync_status
 
@@ -220,4 +258,5 @@ if __name__ == "__main__":
     parser.add_argument("report", help="出力するレポートファイル（ログ）のパス")
     args = parser.parse_args()
 
+    configure_logging()
     run_backup(args.report)
